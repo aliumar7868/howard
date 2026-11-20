@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: Howard HTML Sections (MCP)
+ * Plugin Name: HTML Sections for MCP
  * Description: Adds two MCP abilities: append full width containers holding one Elementor HTML widget each to a DRAFT page, and read those widgets back with checksums. Refuses to touch published pages, the homepage, the posts page, or anything that is not a page.
- * Version:     1.0.0
+ * Version:     1.1.0
  * Requires at least: 6.9
  * Requires PHP: 7.4
  * Author:      Strouse Digital
@@ -20,9 +20,9 @@ add_action(
 			return;
 		}
 		wp_register_ability_category(
-			'howard-tools',
+			'html-sections',
 			array(
-				'label'       => 'Howard tools',
+				'label'       => 'HTML Sections',
 				'description' => 'Site specific helpers for building Elementor pages from raw HTML files.',
 			)
 		);
@@ -37,11 +37,11 @@ add_action(
 		}
 
 		wp_register_ability(
-			'howard/elementor-add-html-sections',
+			'html-sections/add-to-draft',
 			array(
 				'label'               => 'Add HTML sections to a draft Elementor page',
 				'description'         => 'For each item in `sections`, appends one top level Elementor container (full width, zero padding) holding exactly one HTML widget whose content is `html`, stored byte for byte. Works ONLY on pages whose status is draft and that are not the homepage or posts page. mode "append" (default) keeps existing content; mode "replace" removes all existing top level elements first. Returns each new container id, widget id and the sha256 of the HTML as read back from the database.',
-				'category'            => 'howard-tools',
+				'category'            => 'html-sections',
 				'input_schema'        => array(
 					'type'                 => 'object',
 					'properties'           => array(
@@ -81,8 +81,8 @@ add_action(
 					'additionalProperties' => false,
 				),
 				'output_schema'       => array( 'type' => 'object' ),
-				'permission_callback' => 'howard_html_sections_can_write',
-				'execute_callback'    => 'howard_html_sections_add',
+				'permission_callback' => 'html_sections_mcp_can_write',
+				'execute_callback'    => 'html_sections_mcp_add',
 				'meta'                => array(
 					'show_in_rest' => true,
 					'mcp'          => array(
@@ -99,11 +99,11 @@ add_action(
 		);
 
 		wp_register_ability(
-			'howard/elementor-list-html-sections',
+			'html-sections/list',
 			array(
 				'label'               => 'List HTML widgets on an Elementor page',
 				'description'         => 'Read only. Returns the page status, slug and template, then every top level element in order with its layer name and the HTML widgets inside it (id, length, sha256 of the stored HTML).',
-				'category'            => 'howard-tools',
+				'category'            => 'html-sections',
 				'input_schema'        => array(
 					'type'                 => 'object',
 					'properties'           => array(
@@ -119,7 +119,7 @@ add_action(
 				'permission_callback' => static function () {
 					return current_user_can( 'edit_pages' );
 				},
-				'execute_callback'    => 'howard_html_sections_list',
+				'execute_callback'    => 'html_sections_mcp_list',
 				'meta'                => array(
 					'show_in_rest' => true,
 					'mcp'          => array(
@@ -140,14 +140,14 @@ add_action(
 /**
  * Only editors who may post unfiltered HTML can write, otherwise WordPress would strip the code.
  */
-function howard_html_sections_can_write() {
+function html_sections_mcp_can_write() {
 	return current_user_can( 'edit_pages' ) && current_user_can( 'unfiltered_html' );
 }
 
 /**
  * Generates an Elementor style element id.
  */
-function howard_html_sections_new_id() {
+function html_sections_mcp_new_id() {
 	if ( class_exists( '\Elementor\Utils' ) && method_exists( '\Elementor\Utils', 'generate_random_string' ) ) {
 		return \Elementor\Utils::generate_random_string();
 	}
@@ -157,7 +157,7 @@ function howard_html_sections_new_id() {
 /**
  * Reads the decoded Elementor element tree straight from post meta.
  */
-function howard_html_sections_read_tree( $post_id ) {
+function html_sections_mcp_read_tree( $post_id ) {
 	$raw = get_post_meta( $post_id, '_elementor_data', true );
 	if ( is_array( $raw ) ) {
 		return $raw;
@@ -172,7 +172,7 @@ function howard_html_sections_read_tree( $post_id ) {
 /**
  * Collects HTML widgets under an element, depth first, in document order.
  */
-function howard_html_sections_collect_html( array $element, array &$out ) {
+function html_sections_mcp_collect_html( array $element, array &$out ) {
 	if ( isset( $element['elType'], $element['widgetType'] ) && 'widget' === $element['elType'] && 'html' === $element['widgetType'] ) {
 		$html  = isset( $element['settings']['html'] ) ? (string) $element['settings']['html'] : '';
 		$out[] = array(
@@ -184,7 +184,7 @@ function howard_html_sections_collect_html( array $element, array &$out ) {
 	if ( ! empty( $element['elements'] ) && is_array( $element['elements'] ) ) {
 		foreach ( $element['elements'] as $child ) {
 			if ( is_array( $child ) ) {
-				howard_html_sections_collect_html( $child, $out );
+				html_sections_mcp_collect_html( $child, $out );
 			}
 		}
 	}
@@ -193,55 +193,55 @@ function howard_html_sections_collect_html( array $element, array &$out ) {
 /**
  * Safety checks shared by the writer: draft page only, never the homepage or posts page.
  */
-function howard_html_sections_check_target( $post_id ) {
+function html_sections_mcp_check_target( $post_id ) {
 	$post = get_post( $post_id );
 	if ( ! $post ) {
-		return new WP_Error( 'howard_not_found', 'Post not found.' );
+		return new WP_Error( 'html_sections_not_found', 'Post not found.' );
 	}
 	if ( 'page' !== $post->post_type ) {
-		return new WP_Error( 'howard_not_page', 'Only pages are allowed.' );
+		return new WP_Error( 'html_sections_not_page', 'Only pages are allowed.' );
 	}
 	if ( 'draft' !== $post->post_status ) {
-		return new WP_Error( 'howard_not_draft', 'Refusing to edit: page status is "' . $post->post_status . '", only drafts are allowed.' );
+		return new WP_Error( 'html_sections_not_draft', 'Refusing to edit: page status is "' . $post->post_status . '", only drafts are allowed.' );
 	}
 	if ( (int) get_option( 'page_on_front' ) === (int) $post_id || (int) get_option( 'page_for_posts' ) === (int) $post_id ) {
-		return new WP_Error( 'howard_protected', 'Refusing to edit the homepage or posts page.' );
+		return new WP_Error( 'html_sections_protected', 'Refusing to edit the homepage or posts page.' );
 	}
 	if ( ! current_user_can( 'edit_post', $post_id ) ) {
-		return new WP_Error( 'howard_forbidden', 'You cannot edit this page.' );
+		return new WP_Error( 'html_sections_forbidden', 'You cannot edit this page.' );
 	}
 	return $post;
 }
 
 /**
- * Execute callback for howard/elementor-add-html-sections.
+ * Execute callback for html-sections/add-to-draft.
  */
-function howard_html_sections_add( $input ) {
+function html_sections_mcp_add( $input ) {
 	if ( ! class_exists( '\Elementor\Plugin' ) ) {
-		return new WP_Error( 'howard_no_elementor', 'Elementor is not active.' );
+		return new WP_Error( 'html_sections_no_elementor', 'Elementor is not active.' );
 	}
 
 	$post_id  = (int) $input['post_id'];
 	$mode     = isset( $input['mode'] ) ? $input['mode'] : 'append';
 	$sections = $input['sections'];
 
-	$post = howard_html_sections_check_target( $post_id );
+	$post = html_sections_mcp_check_target( $post_id );
 	if ( is_wp_error( $post ) ) {
 		return $post;
 	}
 
 	$document = \Elementor\Plugin::$instance->documents->get( $post_id, false );
 	if ( ! $document ) {
-		return new WP_Error( 'howard_no_document', 'Could not load the Elementor document for this page.' );
+		return new WP_Error( 'html_sections_no_document', 'Could not load the Elementor document for this page.' );
 	}
 
-	$tree = ( 'replace' === $mode ) ? array() : howard_html_sections_read_tree( $post_id );
+	$tree = ( 'replace' === $mode ) ? array() : html_sections_mcp_read_tree( $post_id );
 
 	$expected = array();
 	foreach ( $sections as $section ) {
 		$html         = (string) $section['html'];
-		$container_id = howard_html_sections_new_id();
-		$widget_id    = howard_html_sections_new_id();
+		$container_id = html_sections_mcp_new_id();
+		$widget_id    = html_sections_mcp_new_id();
 
 		$container_settings = array(
 			'content_width' => 'full',
@@ -287,15 +287,15 @@ function howard_html_sections_add( $input ) {
 	// Save through Elementor so it records the edit mode, version, revision and clears this page's CSS file.
 	$saved = $document->save( array( 'elements' => $tree ) );
 	if ( false === $saved ) {
-		return new WP_Error( 'howard_save_failed', 'Elementor refused to save the document.' );
+		return new WP_Error( 'html_sections_save_failed', 'Elementor refused to save the document.' );
 	}
 
 	// Read back from the database and confirm every widget is there with identical HTML.
 	$stored = array();
-	foreach ( howard_html_sections_read_tree( $post_id ) as $element ) {
+	foreach ( html_sections_mcp_read_tree( $post_id ) as $element ) {
 		if ( is_array( $element ) && isset( $element['id'] ) ) {
 			$found = array();
-			howard_html_sections_collect_html( $element, $found );
+			html_sections_mcp_collect_html( $element, $found );
 			$stored[ $element['id'] ] = $found;
 		}
 	}
@@ -327,26 +327,26 @@ function howard_html_sections_add( $input ) {
 }
 
 /**
- * Execute callback for howard/elementor-list-html-sections.
+ * Execute callback for html-sections/list.
  */
-function howard_html_sections_list( $input ) {
+function html_sections_mcp_list( $input ) {
 	$post_id = (int) $input['post_id'];
 	$post    = get_post( $post_id );
 	if ( ! $post ) {
-		return new WP_Error( 'howard_not_found', 'Post not found.' );
+		return new WP_Error( 'html_sections_not_found', 'Post not found.' );
 	}
 	if ( ! current_user_can( 'edit_post', $post_id ) ) {
-		return new WP_Error( 'howard_forbidden', 'You cannot read this page.' );
+		return new WP_Error( 'html_sections_forbidden', 'You cannot read this page.' );
 	}
 
 	$elements    = array();
 	$html_total  = 0;
-	foreach ( howard_html_sections_read_tree( $post_id ) as $index => $element ) {
+	foreach ( html_sections_mcp_read_tree( $post_id ) as $index => $element ) {
 		if ( ! is_array( $element ) ) {
 			continue;
 		}
 		$found = array();
-		howard_html_sections_collect_html( $element, $found );
+		html_sections_mcp_collect_html( $element, $found );
 		$html_total += count( $found );
 		$elements[]  = array(
 			'index'        => $index,
