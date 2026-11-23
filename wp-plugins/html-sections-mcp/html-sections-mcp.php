@@ -2,7 +2,7 @@
 /**
  * Plugin Name: HTML Sections for MCP
  * Description: Adds two MCP abilities: append full width containers holding one Elementor HTML widget each to a DRAFT page, and read those widgets back with checksums. Refuses to touch published pages, the homepage, the posts page, or anything that is not a page.
- * Version:     1.2.0
+ * Version:     1.3.0
  * Requires at least: 6.9
  * Requires PHP: 7.4
  * Author:      Strouse Digital
@@ -460,3 +460,108 @@ add_action(
 	},
 	999
 );
+
+/*
+ * Replace one exact piece of text inside one HTML widget, on any page (published included).
+ * Guarded: the old text must occur exactly once in that widget, and the previous version is kept as a revision.
+ */
+add_action(
+	'wp_abilities_api_init',
+	static function () {
+		if ( ! function_exists( 'wp_register_ability' ) ) {
+			return;
+		}
+		wp_register_ability(
+			'html-sections/replace-in-widget',
+			array(
+				'label'               => 'Replace exact text inside one HTML widget',
+				'description'         => 'Finds the HTML widget `widget_id` on page `post_id` and replaces `old` with `new`. Fails unless `old` occurs exactly once in that widget. Saves through Elementor (creates a revision). Use for small, targeted edits such as swapping an image src.',
+				'category'            => 'html-sections',
+				'input_schema'        => array(
+					'type'                 => 'object',
+					'properties'           => array(
+						'post_id'   => array( 'type' => 'integer', 'minimum' => 1 ),
+						'widget_id' => array( 'type' => 'string', 'minLength' => 1 ),
+						'old'       => array( 'type' => 'string', 'minLength' => 1 ),
+						'new'       => array( 'type' => 'string' ),
+					),
+					'required'             => array( 'post_id', 'widget_id', 'old', 'new' ),
+					'additionalProperties' => false,
+				),
+				'output_schema'       => array( 'type' => 'object' ),
+				'permission_callback' => 'html_sections_mcp_can_write',
+				'execute_callback'    => 'html_sections_mcp_replace_in_widget',
+				'meta'                => array(
+					'show_in_rest' => true,
+					'mcp'          => array( 'public' => true, 'type' => 'tool' ),
+					'annotations'  => array( 'readonly' => false, 'destructive' => false, 'idempotent' => false ),
+				),
+			)
+		);
+	}
+);
+
+function html_sections_mcp_replace_in_widget( $input ) {
+	if ( ! class_exists( '\Elementor\Plugin' ) ) {
+		return new WP_Error( 'html_sections_no_elementor', 'Elementor is not active.' );
+	}
+	$post_id = (int) $input['post_id'];
+	if ( ! get_post( $post_id ) || 'page' !== get_post_type( $post_id ) ) {
+		return new WP_Error( 'html_sections_not_page', 'Page not found.' );
+	}
+	if ( ! current_user_can( 'edit_post', $post_id ) ) {
+		return new WP_Error( 'html_sections_forbidden', 'You cannot edit this page.' );
+	}
+	$tree  = html_sections_mcp_read_tree( $post_id );
+	$state = array( 'found' => false, 'count' => 0, 'sha_before' => '', 'sha_after' => '' );
+	$walk  = static function ( array &$elements ) use ( &$walk, $input, &$state ) {
+		foreach ( $elements as &$el ) {
+			if ( isset( $el['id'], $el['widgetType'] ) && $el['id'] === $input['widget_id'] && 'html' === $el['widgetType'] ) {
+				$html                = isset( $el['settings']['html'] ) ? (string) $el['settings']['html'] : '';
+				$state['found']      = true;
+				$state['count']      = substr_count( $html, $input['old'] );
+				$state['sha_before'] = hash( 'sha256', $html );
+				if ( 1 === $state['count'] ) {
+					$html                   = str_replace( $input['old'], $input['new'], $html );
+					$el['settings']['html'] = $html;
+					$state['sha_after']     = hash( 'sha256', $html );
+				}
+				return;
+			}
+			if ( ! empty( $el['elements'] ) && is_array( $el['elements'] ) ) {
+				$walk( $el['elements'] );
+			}
+		}
+	};
+	$walk( $tree );
+	if ( ! $state['found'] ) {
+		return new WP_Error( 'html_sections_widget_not_found', 'No HTML widget with that id on this page.' );
+	}
+	if ( 1 !== $state['count'] ) {
+		return new WP_Error( 'html_sections_ambiguous', 'The old text occurs ' . $state['count'] . ' times in that widget; it must occur exactly once.' );
+	}
+	$document = \Elementor\Plugin::$instance->documents->get( $post_id, false );
+	if ( ! $document || false === $document->save( array( 'elements' => $tree ) ) ) {
+		return new WP_Error( 'html_sections_save_failed', 'Elementor refused to save the document.' );
+	}
+	$check = array();
+	foreach ( html_sections_mcp_read_tree( $post_id ) as $el ) {
+		if ( is_array( $el ) ) {
+			html_sections_mcp_collect_html( $el, $check );
+		}
+	}
+	$stored = '';
+	foreach ( $check as $w ) {
+		if ( $w['widget_id'] === $input['widget_id'] ) {
+			$stored = $w['sha256'];
+		}
+	}
+	return array(
+		'post_id'     => $post_id,
+		'widget_id'   => $input['widget_id'],
+		'sha_before'  => $state['sha_before'],
+		'sha_after'   => $state['sha_after'],
+		'saved_exact' => ( $stored === $state['sha_after'] ),
+		'status'      => get_post_status( $post_id ),
+	);
+}
