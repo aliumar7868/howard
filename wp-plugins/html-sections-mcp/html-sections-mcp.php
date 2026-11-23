@@ -2,7 +2,7 @@
 /**
  * Plugin Name: HTML Sections for MCP
  * Description: Adds two MCP abilities: append full width containers holding one Elementor HTML widget each to a DRAFT page, and read those widgets back with checksums. Refuses to touch published pages, the homepage, the posts page, or anything that is not a page.
- * Version:     1.1.0
+ * Version:     1.2.0
  * Requires at least: 6.9
  * Requires PHP: 7.4
  * Author:      Strouse Digital
@@ -371,3 +371,92 @@ function html_sections_mcp_list( $input ) {
 		'edit_url'           => admin_url( 'post.php?post=' . $post_id . '&action=elementor' ),
 	);
 }
+
+/*
+ * Page CSS: a small CSS block stored per page and printed in that page's <head>.
+ * Used for layout fixes without editing the HTML widgets themselves.
+ */
+add_action(
+	'wp_abilities_api_init',
+	static function () {
+		if ( ! function_exists( 'wp_register_ability' ) ) {
+			return;
+		}
+		wp_register_ability(
+			'html-sections/page-css',
+			array(
+				'label'               => 'Get or set extra CSS for one page',
+				'description'         => 'Stores a CSS block for one page and prints it in that page\'s <head> after all other styles. Omit `css` to read the current value; pass an empty string to remove it. Does not change any Elementor element.',
+				'category'            => 'html-sections',
+				'input_schema'        => array(
+					'type'                 => 'object',
+					'properties'           => array(
+						'post_id' => array(
+							'type'    => 'integer',
+							'minimum' => 1,
+						),
+						'css'     => array( 'type' => 'string' ),
+					),
+					'required'             => array( 'post_id' ),
+					'additionalProperties' => false,
+				),
+				'output_schema'       => array( 'type' => 'object' ),
+				'permission_callback' => static function () {
+					return current_user_can( 'edit_pages' ) && current_user_can( 'unfiltered_html' );
+				},
+				'execute_callback'    => 'html_sections_mcp_page_css',
+				'meta'                => array(
+					'show_in_rest' => true,
+					'mcp'          => array(
+						'public' => true,
+						'type'   => 'tool',
+					),
+					'annotations'  => array(
+						'readonly'    => false,
+						'destructive' => false,
+						'idempotent'  => true,
+					),
+				),
+			)
+		);
+	}
+);
+
+function html_sections_mcp_page_css( $input ) {
+	$post_id = (int) $input['post_id'];
+	if ( ! get_post( $post_id ) ) {
+		return new WP_Error( 'html_sections_not_found', 'Post not found.' );
+	}
+	if ( ! current_user_can( 'edit_post', $post_id ) ) {
+		return new WP_Error( 'html_sections_forbidden', 'You cannot edit this page.' );
+	}
+	if ( array_key_exists( 'css', $input ) ) {
+		$css = str_ireplace( '</style', '', (string) $input['css'] );
+		if ( '' === trim( $css ) ) {
+			delete_post_meta( $post_id, '_html_sections_page_css' );
+		} else {
+			update_post_meta( $post_id, '_html_sections_page_css', wp_slash( $css ) );
+		}
+		if ( function_exists( 'clean_post_cache' ) ) {
+			clean_post_cache( $post_id );
+		}
+	}
+	return array(
+		'post_id' => $post_id,
+		'css'     => (string) get_post_meta( $post_id, '_html_sections_page_css', true ),
+	);
+}
+
+add_action(
+	'wp_head',
+	static function () {
+		if ( ! is_singular() ) {
+			return;
+		}
+		$css = (string) get_post_meta( get_queried_object_id(), '_html_sections_page_css', true );
+		if ( '' !== trim( $css ) ) {
+			echo "\n<style id=\"html-sections-page-css\">\n" . str_ireplace( '</style', '', $css ) . "\n</style>\n"; // phpcs:ignore WordPress.Security.EscapeOutput
+		}
+	},
+	999
+);
